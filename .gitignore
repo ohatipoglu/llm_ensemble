@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+*.egg-info/
+
+# Virtual Env
+.venv/
+venv/
+ENV/
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test
+.pytest_cache/
+test_temp/
+htmlcov/
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Docker
+docker-compose.override.yml

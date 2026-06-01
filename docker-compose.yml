@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_service
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Host üzerinde GPU varsa NVIDIA donanım hızlandırmasını etkinleştir
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - debate_network
+
+  app:
+    build: .
+    container_name: debate_app
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - MAX_CONCURRENT_CALLS=2
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - db_data:/app
+      - ./logs:/app/logs
+    depends_on:
+      - ollama
+    stdin_open: true
+    tty: true
+    networks:
+      - debate_network
+
+#  langfuse:
+#    image: langfuse/langfuse:2
+#    container_name: langfuse_observability
+#    profiles:
+#      - observability
+#    ports:
+#      - "3000:3000"
+#    environment:
+#      - DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres
+#      - NEXTAUTH_SECRET=secret
+#      - NEXTAUTH_URL=http://localhost:3000
+#    networks:
+#      - debate_network
+
+
+volumes:
+  ollama_data:
+  db_data:
+
+networks:
+  debate_network:
+    driver: bridge

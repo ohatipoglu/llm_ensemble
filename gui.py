@@ -10,10 +10,11 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QComboBox, QPushButton, QLabel, QTextEdit, QTabWidget,
     QMessageBox, QSplitter, QDialog, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QProgressBar, QCheckBox, QTextBrowser
+    QHeaderView, QProgressBar, QCheckBox, QTextBrowser,
+    QTreeWidget, QTreeWidgetItem
 )
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, Qt
-from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor
+from PyQt5.QtGui import QFont, QFontDatabase, QTextCursor, QColor, QBrush
 
 from api.api_manager import APIManager
 from db.database_manager import DatabaseManager
@@ -306,6 +307,304 @@ class PromptViewerWindow(QDialog):
         self.loadConversations()
         super().showEvent(event)
 
+class TelemetryViewerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📊 Yerel Telemetry İzleyici - Son 500 Kayıt")
+        self.setMinimumSize(1100, 750)
+        self.resize(1200, 850)
+        
+        # Standard window flags to allow maximize, minimize, close and remove the help button
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        
+        self.initUI()
+        self.refresh_data()
+        
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        
+        # Top Label
+        title_label = QLabel("📊 Yerel Telemetry İzleyici - Son 500 Kayıt (Agresif İzleme)")
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        layout.addWidget(title_label)
+        
+        # Splitter to divide tree and details
+        self.splitter = QSplitter(Qt.Vertical)
+        
+        # Tree Widget
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(8)
+        self.tree.setHeaderLabels([
+            "Trace ID", "Span/Model", "Aşama", "TTFT (s)", "TPS", "Süre", "Durum", "Zaman"
+        ])
+        
+        # Resize behavior
+        header = self.tree.header()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch) # Stretch model column
+        
+        self.splitter.addWidget(self.tree)
+        
+        # Details Panel
+        self.details_panel = QTextBrowser()
+        self.details_panel.setPlaceholderText("Detaylarını görmek için listeden bir span seçin...")
+        self.details_panel.setStyleSheet("background-color: #1e1e2e; color: #f8f8f2; font-family: Consolas, monospace;")
+        self.splitter.addWidget(self.details_panel)
+        
+        # Set splitter sizes (e.g. 60% tree, 40% details)
+        self.splitter.setSizes([450, 300])
+        
+        layout.addWidget(self.splitter)
+        
+        # Connect Selection Signal
+        self.tree.itemSelectionChanged.connect(self.show_span_details)
+        
+        # Bottom Buttons
+        btn_layout = QHBoxLayout()
+        
+        self.refresh_btn = QPushButton("🔄 Yenile")
+        self.refresh_btn.clicked.connect(self.refresh_data)
+        btn_layout.addWidget(self.refresh_btn)
+        
+        self.clear_btn = QPushButton("🗑️ Temizle")
+        self.clear_btn.clicked.connect(self.clear_data)
+        btn_layout.addWidget(self.clear_btn)
+        
+        self.close_btn = QPushButton("Kapat")
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+    def refresh_data(self):
+        from core.telemetry import TelemetryStorage
+        import collections
+        
+        self.tree.clear()
+        self.details_panel.clear()
+        
+        storage = TelemetryStorage.get_instance()
+        spans = storage.get_all_spans()
+        
+        if not spans:
+            return
+            
+        span_map = {s["span_id"]: s for s in spans}
+        children_map = collections.defaultdict(list)
+        for s in spans:
+            if s["parent_id"]:
+                children_map[s["parent_id"]].append(s)
+                
+        # Find root spans
+        root_spans = []
+        for s in spans:
+            if not s["parent_id"] or s["parent_id"] not in span_map:
+                root_spans.append(s)
+                
+        # Sort root spans chronologically by start_time
+        root_spans.sort(key=lambda s: s["start_time"])
+        
+        def add_item(parent_item, span_dict):
+            # Create QTreeWidgetItem
+            item = QTreeWidgetItem(parent_item)
+            item.setData(0, Qt.UserRole, span_dict["span_id"])
+                
+            # Formatting trace_id
+            trace_id = span_dict["trace_id"]
+            trace_id_str = str(trace_id) if trace_id < 1000000 else f"{trace_id:032x}"
+            
+            # Formatting name/model
+            span_name = span_dict["name"]
+            llm_model = span_dict.get("llm_model")
+            span_model_str = llm_model if llm_model else span_name
+            if span_name == "run_full_conversation":
+                span_model_str = "Full Conversation"
+            elif span_name.startswith("run_"):
+                span_model_str = span_name.replace("run_", "").capitalize()
+            elif span_name.startswith("tool_call:"):
+                span_model_str = span_name.replace("tool_call:", "🔨 ")
+                
+            # Stage
+            attributes = span_dict.get("attributes", {})
+            stage_str = ""
+            if span_name == "run_full_conversation":
+                stage_str = f"Start: {attributes.get('stage.start', '')}"
+            elif "stage.name" in attributes:
+                stage_str = attributes.get("stage.name")
+            elif "agent.role" in attributes:
+                stage_str = attributes.get("agent.role")
+            elif span_name == "ollama_api_call":
+                stage_str = "API Call"
+            elif span_name.startswith("tool_call:"):
+                stage_str = "Tool/DB Call"
+                
+            # Performance metrics
+            ttft_val = span_dict.get("ttft")
+            tps_val = span_dict.get("tps")
+            ttft_str = f"{ttft_val:.2f}" if ttft_val is not None else ""
+            tps_str = f"{tps_val:.2f}" if tps_val is not None else ""
+            
+            # Duration
+            duration_ms = span_dict.get("duration_ms", 0)
+            duration_str = f"{duration_ms:.0f} ms"
+            
+            # Status
+            status_str = span_dict.get("status", "OK")
+            
+            # Time
+            start_time = span_dict.get("start_time", 0)
+            time_str = datetime.datetime.fromtimestamp(start_time).strftime("%H:%M:%S") if start_time else ""
+            
+            item.setText(0, trace_id_str)
+            item.setText(1, span_model_str)
+            item.setText(2, stage_str)
+            item.setText(3, ttft_str)
+            item.setText(4, tps_str)
+            item.setText(5, duration_str)
+            item.setText(6, status_str)
+            item.setText(7, time_str)
+            
+            # Color code
+            color = QColor("#81c784") if status_str == "OK" else QColor("#ff5252")
+            brush = QBrush(color)
+            for i in range(8):
+                item.setForeground(i, brush)
+                
+            # Add child items
+            children = children_map.get(span_dict["span_id"], [])
+            children.sort(key=lambda s: s["start_time"])
+            for child in children:
+                add_item(item, child)
+                
+        for root in root_spans:
+            add_item(self.tree, root)
+            
+        self.tree.expandAll()
+
+    def show_span_details(self):
+        selected_items = self.tree.selectedItems()
+        if not selected_items:
+            self.details_panel.clear()
+            return
+        item = selected_items[0]
+        span_id = item.data(0, Qt.UserRole)
+        
+        from core.telemetry import TelemetryStorage
+        spans = TelemetryStorage.get_instance().get_all_spans()
+        span_dict = next((s for s in spans if s["span_id"] == span_id), None)
+        if not span_dict:
+            self.details_panel.clear()
+            return
+            
+        # Build beautiful HTML report of the span details
+        html = f"<div style='font-family: Arial, sans-serif; line-height: 1.5; padding: 10px;'>"
+        html += f"<h2 style='color: #a6e22e; margin-bottom: 5px; border-bottom: 1px solid #3e3e5e; padding-bottom: 5px;'>🔍 Span Detayları: {span_dict['name']}</h2>"
+        
+        # Meta info table
+        html += "<table style='width: 100%; border-collapse: collapse; margin-bottom: 15px;'>"
+        html += f"<tr><td style='width: 150px; font-weight: bold; color: #66d9ef;'>Trace ID:</td><td>{span_dict['trace_id']}</td></tr>"
+        html += f"<tr><td style='font-weight: bold; color: #66d9ef;'>Span ID:</td><td>{span_dict['span_id']}</td></tr>"
+        if span_dict['parent_id']:
+            html += f"<tr><td style='font-weight: bold; color: #66d9ef;'>Parent ID:</td><td>{span_dict['parent_id']}</td></tr>"
+        html += f"<tr><td style='font-weight: bold; color: #66d9ef;'>Başlangıç:</td><td>{datetime.datetime.fromtimestamp(span_dict['start_time']).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}</td></tr>"
+        html += f"<tr><td style='font-weight: bold; color: #66d9ef;'>Toplam Süre:</td><td><span style='color: #fd971f; font-weight: bold;'>{span_dict['duration_ms']:.2f} ms</span></td></tr>"
+        
+        status_color = "#a6e22e" if span_dict['status'] == "OK" else "#f92672"
+        html += f"<tr><td style='font-weight: bold; color: #66d9ef;'>Durum:</td><td><span style='color: {status_color}; font-weight: bold;'>{span_dict['status']}</span></td></tr>"
+        html += "</table>"
+        
+        # Performance/Tokens
+        attrs = span_dict.get("attributes", {})
+        if span_dict.get("llm_model") or "token.total" in attrs:
+            html += "<h3 style='color: #f92672; border-bottom: 1px solid #3e3e5e; padding-bottom: 2px;'>📊 LLM & Token İstatistikleri</h3>"
+            html += "<ul>"
+            if span_dict.get("llm_model"):
+                html += f"<li><b>Kullanılan Model:</b> {span_dict['llm_model']}</li>"
+            if "llm.quantization_level" in attrs:
+                html += f"<li><b>Quantization Seviyesi:</b> {attrs['llm.quantization_level']}</li>"
+            if "llm.vram_percent" in attrs:
+                html += f"<li><b>VRAM Tahsis Yüzdesi:</b> {attrs['llm.vram_percent']}%</li>"
+            if "token.prompt" in attrs:
+                html += f"<li><b>Prompt Tokens:</b> {attrs['token.prompt']}</li>"
+            if "token.completion" in attrs:
+                html += f"<li><b>Completion Tokens:</b> {attrs['token.completion']}</li>"
+            if "token.total" in attrs:
+                html += f"<li><b>Toplam Token:</b> {attrs['token.total']}</li>"
+            if span_dict.get("ttft") is not None:
+                html += f"<li><b>Time to First Token (TTFT):</b> {span_dict['ttft']:.2f} s</li>"
+            if span_dict.get("tps") is not None:
+                html += f"<li><b>Tokens Per Second (TPS):</b> {span_dict['tps']:.2f} token/s</li>"
+            html += "</ul>"
+            
+        # Inference Durations & Python Overhead
+        if "duration.total_dur_ms" in attrs or "duration.python_overhead_ms" in attrs:
+            html += "<h3 style='color: #66d9ef; border-bottom: 1px solid #3e3e5e; padding-bottom: 2px;'>⚡ Çıkarım (Inference) ve Donanım Süreleri</h3>"
+            html += "<ul>"
+            if "duration.total_dur_ms" in attrs:
+                html += f"<li><b>Model Net Çıkarım Süresi:</b> {attrs['duration.total_dur_ms']:.2f} ms</li>"
+            if "duration.load_dur_ms" in attrs:
+                html += f"<li><b>Model Yükleme Süresi:</b> {attrs['duration.load_dur_ms']:.2f} ms</li>"
+            if "duration.prompt_dur_ms" in attrs:
+                html += f"<li><b>Prompt Değerlendirme Süresi:</b> {attrs['duration.prompt_dur_ms']:.2f} ms</li>"
+            if "duration.eval_dur_ms" in attrs:
+                html += f"<li><b>Yanıt Üretim Süresi:</b> {attrs['duration.eval_dur_ms']:.2f} ms</li>"
+            if "duration.python_overhead_ms" in attrs:
+                html += f"<li><b>Python Overhead (Sistem Gecikmesi):</b> <span style='color: #ae81ff;'>{attrs['duration.python_overhead_ms']:.2f} ms</span></li>"
+            html += "</ul>"
+            
+        # Hardware info
+        if "hw.gpu" in attrs:
+            html += "<h3 style='color: #fd971f; border-bottom: 1px solid #3e3e5e; padding-bottom: 2px;'>💻 Yerel Donanım ve Profilleme</h3>"
+            html += f"<ul>"
+            html += f"<li><b>GPU Donanımı:</b> {attrs.get('hw.gpu', 'Unknown')}</li>"
+            html += f"<li><b>Donanım Backend API:</b> {attrs.get('hw.backends', 'CPU')}</li>"
+            html += "</ul>"
+
+        # Attributes list
+        if attrs:
+            html += "<h3 style='color: #ae81ff; border-bottom: 1px solid #3e3e5e; padding-bottom: 2px;'>⚙️ Span Öznitelikleri (Attributes)</h3>"
+            html += "<table style='width: 100%; border-collapse: collapse; border: 1px solid #3e3e5e; color: #f8f8f2;'>"
+            for k, v in sorted(attrs.items()):
+                # Prompts show in dedicated code blocks below
+                if k in ["llm.system_prompt", "llm.user_prompt", "llm.raw_response"]:
+                    continue
+                html += f"<tr style='border-bottom: 1px solid #2e2e4e;'><td style='padding: 5px; font-weight: bold; width: 220px; color: #e6db74;'>{k}</td><td style='padding: 5px; font-family: monospace; word-break: break-all;'>{v}</td></tr>"
+            html += "</table><br/>"
+
+        # Prompts and response blocks
+        if "llm.system_prompt" in attrs and attrs["llm.system_prompt"]:
+            html += f"<h4 style='color: #e6db74; margin-bottom: 5px;'>📝 System Prompt:</h4>"
+            html += f"<pre style='background: #272822; color: #f8f8f2; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: Consolas, monospace; border: 1px solid #3e3e5e;'>{attrs['llm.system_prompt']}</pre>"
+        if "llm.user_prompt" in attrs and attrs["llm.user_prompt"]:
+            html += f"<h4 style='color: #e6db74; margin-bottom: 5px;'>👤 User Prompt:</h4>"
+            html += f"<pre style='background: #272822; color: #f8f8f2; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: Consolas, monospace; border: 1px solid #3e3e5e;'>{attrs['llm.user_prompt']}</pre>"
+        if "llm.raw_response" in attrs and attrs["llm.raw_response"]:
+            html += f"<h4 style='color: #e6db74; margin-bottom: 5px;'>🤖 LLM Yanıtı:</h4>"
+            html += f"<pre style='background: #272822; color: #a6e22e; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-family: Consolas, monospace; border: 1px solid #3e3e5e;'>{attrs['llm.raw_response']}</pre>"
+
+        # Errors & Stacktrace
+        error_keys = [k for k in attrs.keys() if k.startswith("error.local.")]
+        if error_keys:
+            html += "<h3 style='color: #f92672; border-bottom: 1px solid #ef4444; padding-bottom: 2px;'>❌ Hata Esnasındaki Lokal Değişken Durumları</h3>"
+            html += "<table style='width: 100%; border-collapse: collapse; border: 1px solid #ef4444; color: #f8f8f2;'>"
+            for k in sorted(error_keys):
+                var_name = k.replace("error.local.", "")
+                html += f"<tr style='border-bottom: 1px solid #ef4444;'><td style='padding: 5px; font-weight: bold; color: #fca5a5; width: 150px;'>{var_name}</td><td style='padding: 5px; font-family: monospace; word-break: break-all;'>{attrs[k]}</td></tr>"
+            html += "</table><br/>"
+            
+        html += "</div>"
+        self.details_panel.setHtml(html)
+
+    def clear_data(self):
+        reply = QMessageBox.question(self, "Onay", 
+            "Tüm telemetry kayıtları silinecek. Emin misiniz?",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            from core.telemetry import TelemetryStorage
+            TelemetryStorage.get_instance().clear_spans()
+            self.refresh_data()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -407,6 +706,10 @@ class MainWindow(QMainWindow):
         self.prompt_viewer_button = QPushButton("Gönderilen Promptları Göster")
         self.prompt_viewer_button.clicked.connect(self.showPromptViewer)
         control_layout.addWidget(self.prompt_viewer_button)
+        
+        self.telemetry_button = QPushButton("📊 Telemetry")
+        self.telemetry_button.clicked.connect(self.showTelemetryViewer)
+        control_layout.addWidget(self.telemetry_button)
         
         control_layout.addSpacing(20)
 
@@ -755,6 +1058,11 @@ class MainWindow(QMainWindow):
         logger.info(f"Arayüz: Prompt kayıtları görüntüleme penceresi açıldı (Konuşma #{conv_id})")
         self.prompt_viewer.show()
         self.prompt_viewer.activateWindow()
+
+    def showTelemetryViewer(self):
+        logger.info("Arayüz: Yerel Telemetry İzleyici penceresi açıldı")
+        dialog = TelemetryViewerDialog(self)
+        dialog.exec_()
 
     def closeEvent(self, event):
         logger.info("Arayüz: Uygulama kapatılıyor...")
